@@ -13,10 +13,6 @@ import time
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("USE_LOCAL_MODELS", "true")
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -38,15 +34,15 @@ st.markdown("""
 }
 .metric-card {
     background: #f0f4f8; border-radius: 8px; padding: 1rem;
-    border-left: 4px solid #1a3c6e; margin: 0.5rem 0;
+    border-left: 4px solid #1a3c6e; margin: 0.5rem 0; color: #1a1a1a;
 }
 .answer-box {
-    background: #e8f4e8; border-radius: 8px; padding: 1.2rem;
-    border-left: 4px solid #2e7d32; font-size: 1.05rem;
+    background: #ffffff; border-radius: 8px; padding: 1.2rem;
+    border-left: 4px solid #2e7d32; font-size: 1.05rem; color: #1a1a1a;
 }
 .source-box {
     background: #fff8e1; border-radius: 6px; padding: 0.8rem;
-    border-left: 3px solid #f57c00; margin: 0.3rem 0; font-size: 0.9rem;
+    border-left: 3px solid #f57c00; margin: 0.3rem 0; font-size: 0.9rem; color: #1a1a1a;
 }
 .step-badge {
     background: #1a3c6e; color: white; border-radius: 50%;
@@ -80,31 +76,19 @@ def load_qa_chain():
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/24701-nature-natural-beauty.jpg/1px-placeholder.png",
-             width=80, use_container_width=True)
+             width=80)
 
     st.markdown("## ⚙️ Settings")
 
-    openai_key = st.text_input(
-        "OpenAI API Key (optional)",
-        type="password",
-        placeholder="sk-... (leave blank for free local mode)",
-        help="If provided, GPT-4o-mini generates grounded answers. "
-             "Without a key, the most relevant passage is returned directly.",
-    )
-    if openai_key:
-        os.environ["OPENAI_API_KEY"] = openai_key
-        os.environ["USE_LOCAL_MODELS"] = "false"
-    else:
-        os.environ["USE_LOCAL_MODELS"] = "true"
-
     n_chunks = st.slider("Chunks retrieved per question", min_value=1, max_value=8, value=3)
+    st.caption("Embeddings: all-MiniLM-L6-v2 (free and local)")
 
     st.markdown("---")
     st.markdown("### 🏛️ About")
     st.markdown(
         "**EC7203 Advanced AI**  \n"
         "AI-Powered Financial Document Q&A  \n"
-        "Using RAG · NLP · LLM · Prompt Engineering"
+        "Using semantic retrieval · NLP · sentence transformers"
     )
     st.markdown("---")
     st.markdown("### 🔧 Architecture")
@@ -112,7 +96,7 @@ with st.sidebar:
         "**Phase 1 — Indexing**  \n"
         "PDF → Extract → Chunk → Embed → Store  \n\n"
         "**Phase 2 — Querying**  \n"
-        "Question → Embed → Search → Generate"
+        "Question → Embed → Search → Return grounded excerpts"
     )
 
 
@@ -146,51 +130,88 @@ with tab1:
                  "or any financial PDF document.",
         )
 
-        if uploaded_file:
+        if uploaded_file is not None:
             st.success(f"✅ File received: **{uploaded_file.name}** "
                        f"({uploaded_file.size / 1024:.1f} KB)")
+        else:
+            st.caption("Select a PDF above to enable document indexing.")
 
-            if st.button("🚀 Index This Document", type="primary", use_container_width=True):
-                with st.spinner("Indexing — extracting text, chunking, generating embeddings..."):
-                    try:
-                        from pipeline import ingest_document
+        index_clicked = st.button(
+            "🚀 Index This Document",
+            type="primary",
+            width="stretch",
+            disabled=uploaded_file is None,
+            help="Upload a PDF first, then click here to add it to the vector index.",
+        )
 
-                        # Write to a temp file so pdfplumber can open it by path
-                        with tempfile.NamedTemporaryFile(
-                            delete=False, suffix=".pdf",
-                            prefix=uploaded_file.name.replace(".pdf", "_"),
-                        ) as tmp:
-                            tmp.write(uploaded_file.getbuffer())
-                            tmp_path = tmp.name
+        if index_clicked and uploaded_file is not None:
+            with st.spinner("Indexing — extracting text, chunking, generating embeddings..."):
+                tmp_path = None
+                try:
+                    from pipeline import ingest_document
 
-                        t0 = time.perf_counter()
-                        result = ingest_document(tmp_path)
-                        elapsed = time.perf_counter() - t0
+                    # pdfplumber needs a filesystem path for the uploaded file.
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(uploaded_file.getbuffer())
+                        tmp_path = tmp.name
+
+                    t0 = time.perf_counter()
+                    result = ingest_document(tmp_path, source_name=uploaded_file.name)
+                    elapsed = time.perf_counter() - t0
+
+                    st.session_state["indexed_doc"] = uploaded_file.name
+                    st.session_state["index_result"] = result
+
+                    st.success(f"✅ Document indexed in {elapsed:.1f}s")
+                    st.json({
+                        "Pages extracted": result["pages"],
+                        "Chunks created": result["chunks"],
+                        "Avg tokens/chunk": result.get("avg_tokens_per_chunk", "—"),
+                    })
+                except Exception as e:
+                    st.error(f"Indexing failed: {e}")
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
                         os.unlink(tmp_path)
-
-                        st.session_state["indexed_doc"] = uploaded_file.name
-                        st.session_state["index_result"] = result
-
-                        st.success(f"✅ Document indexed in {elapsed:.1f}s")
-                        st.json({
-                            "Pages extracted": result["pages"],
-                            "Chunks created": result["chunks"],
-                            "Avg tokens/chunk": result.get("avg_tokens_per_chunk", "—"),
-                        })
-
-                    except Exception as e:
-                        st.error(f"Indexing failed: {e}")
 
         # Show currently indexed documents
         st.markdown("---")
-        st.subheader("Indexed Documents")
+        st.subheader("📚 Indexed Documents")
+
+        if "confirm_clear_all" not in st.session_state:
+            st.session_state["confirm_clear_all"] = False
+
         try:
-            from pipeline import list_indexed_documents
+            from pipeline import list_indexed_documents, delete_document
             docs = list_indexed_documents()
             if docs:
                 for d in docs:
-                    st.markdown(f"📄 `{d}`")
+                    col_doc, col_del = st.columns([3, 1])
+                    col_doc.markdown(f"📄 `{d}`")
+                    if col_del.button("🗑️", key=f"del_{d}", help=f"Remove {d}"):
+                        delete_document(d)
+                        st.success(f"Removed **{d}** from the index.")
+                        st.rerun()
+
+                st.markdown("")
+                if not st.session_state["confirm_clear_all"]:
+                    if st.button("🗑️ Clear All Documents", type="secondary", width="stretch"):
+                        st.session_state["confirm_clear_all"] = True
+                        st.rerun()
+                else:
+                    st.warning("⚠️ This will permanently remove all indexed documents. Are you sure?")
+                    col_yes, col_no = st.columns(2)
+                    if col_yes.button("✅ Yes, Clear All", type="primary"):
+                        for d in docs:
+                            delete_document(d)
+                        st.session_state["confirm_clear_all"] = False
+                        st.success("All documents cleared from the index.")
+                        st.rerun()
+                    if col_no.button("❌ Cancel"):
+                        st.session_state["confirm_clear_all"] = False
+                        st.rerun()
             else:
+                st.session_state["confirm_clear_all"] = False
                 st.info("No documents indexed yet. Upload and index a PDF above.")
         except Exception:
             st.info("Index not yet initialised.")
@@ -232,7 +253,7 @@ with tab1:
         except Exception:
             source_filter = None
 
-        ask_btn = st.button("🔍 Ask", type="primary", use_container_width=True,
+        ask_btn = st.button("🔍 Ask", type="primary", width="stretch",
                             disabled=not question.strip())
 
         if ask_btn and question.strip():
@@ -380,7 +401,7 @@ with tab2:
                     "Query Time": f"{m.get('avg_query_time_ms', 0):.1f} ms",
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
 
         st.caption(f"Results from: `{result_files[0]}`")
 
@@ -416,8 +437,8 @@ PHASE 1 - INDEXING (run once per document)
 ----------------------------------------------------------
   PDF Upload
     --> Text Extraction  (pdfplumber + table support)
-         --> Text Chunking  (800 tokens, 150-token overlap)
-              --> Embedding  (MiniLM-L6-v2 or OpenAI)
+         --> Text Chunking  (200 tokens, 40-token overlap)
+              --> Embedding  (all-MiniLM-L6-v2)
                    --> ChromaDB Vector Store (cosine ANN)
 
 PHASE 2 - QUERYING (run on every user question)
@@ -425,8 +446,8 @@ PHASE 2 - QUERYING (run on every user question)
   User Question
     --> Query Embedding  (same model as documents)
          --> Cosine Search  (top-K relevant chunks)
-              --> LLM + Prompt Engineering
-                   --> Grounded Answer + Page Citations
+              --> Ranked Document Excerpts
+                   --> Grounded Response + Page Citations
 ```
 """)
 
@@ -445,14 +466,14 @@ PHASE 2 - QUERYING (run on every user question)
         """)
 
     with col2:
-        st.markdown("#### 2. LLM")
+        st.markdown("#### 2. Semantic Retrieval")
         st.markdown("""
-- GPT-4o-mini (OpenAI API)
-- Transformer decoder architecture
-- Temperature = 0.1 (factual)
-- Grounded generation from context
-- Source citation enforcement
-- Free fallback: retrieval-only mode
+- all-MiniLM-L6-v2 embeddings
+- Transformer encoder architecture
+- 384-dimensional dense vectors
+- Cosine similarity ranking
+- Grounded document excerpts
+- Fully local operation
         """)
 
     with col3:
